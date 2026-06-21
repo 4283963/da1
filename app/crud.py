@@ -74,6 +74,23 @@ def _get_last_cumulatives(db: Session, test_id: int) -> Tuple[float, float, floa
     )
 
 
+def _is_valid_current_voltage(current_a: Optional[float], voltage_v: Optional[float]) -> bool:
+    import numpy as np
+
+    if current_a is None or voltage_v is None:
+        return False
+    try:
+        c = float(current_a)
+        v = float(voltage_v)
+        if np.isnan(c) or np.isinf(c):
+            return False
+        if np.isnan(v) or np.isinf(v):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def create_data_point(
     db: Session,
     test_id: int,
@@ -83,25 +100,30 @@ def create_data_point(
     if not test:
         return None
 
+    if not _is_valid_current_voltage(data.current_a, data.voltage_v):
+        return None
+
     dt_hours = settings.sample_interval_ms / 1000.0 / 3600.0
 
     charge_ah_inc = 0.0
     discharge_ah_inc = 0.0
-    if data.current_a > 0:
-        charge_ah_inc = data.current_a * dt_hours
-    elif data.current_a < 0:
-        discharge_ah_inc = abs(data.current_a) * dt_hours
+    safe_current = float(data.current_a)
+    safe_voltage = float(data.voltage_v)
+    if safe_current > 0:
+        charge_ah_inc = safe_current * dt_hours
+    elif safe_current < 0:
+        discharge_ah_inc = abs(safe_current) * dt_hours
 
-    charge_wh_inc = charge_ah_inc * data.voltage_v
-    discharge_wh_inc = discharge_ah_inc * data.voltage_v
+    charge_wh_inc = charge_ah_inc * safe_voltage
+    discharge_wh_inc = discharge_ah_inc * safe_voltage
 
     cum_ch_ah, cum_dis_ah, cum_ch_wh, cum_dis_wh = _get_last_cumulatives(db, test_id)
 
     phase = data.phase or test.status
     if phase == models.TestStatus.IDLE:
-        if data.current_a > 0:
+        if safe_current > 0:
             phase = models.TestStatus.CHARGING
-        elif data.current_a < 0:
+        elif safe_current < 0:
             phase = models.TestStatus.DISCHARGING
         else:
             phase = models.TestStatus.RESTING
@@ -109,8 +131,8 @@ def create_data_point(
     point = models.DataPoint(
         test_id=test_id,
         timestamp=data.timestamp or datetime.utcnow(),
-        current_a=data.current_a,
-        voltage_v=data.voltage_v,
+        current_a=safe_current,
+        voltage_v=safe_voltage,
         cumulative_charge_ah=cum_ch_ah + charge_ah_inc,
         cumulative_discharge_ah=cum_dis_ah + discharge_ah_inc,
         cumulative_charge_wh=cum_ch_wh + charge_wh_inc,

@@ -16,10 +16,46 @@ class PhaseStats:
     data_count: int
 
 
+def _is_valid_point(p: Optional[DataPoint]) -> bool:
+    if p is None:
+        return False
+    if p.timestamp is None:
+        return False
+    if p.current_a is None:
+        return False
+    if p.voltage_v is None:
+        return False
+    try:
+        cur = float(p.current_a)
+        vol = float(p.voltage_v)
+        if np.isnan(cur) or np.isinf(cur):
+            return False
+        if np.isnan(vol) or np.isinf(vol):
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        v = float(value)
+        if np.isnan(v) or np.isinf(v):
+            return default
+        return v
+    except (TypeError, ValueError):
+        return default
+
+
+def _validate_and_filter(points: Sequence[DataPoint]) -> List[DataPoint]:
+    return [p for p in points if _is_valid_point(p)]
+
+
 def _split_phases(points: Sequence[DataPoint]) -> Tuple[List[DataPoint], List[DataPoint]]:
+    valid_points = _validate_and_filter(points)
     charge_points: List[DataPoint] = []
     discharge_points: List[DataPoint] = []
-    for p in points:
+    for p in valid_points:
         if p.phase == TestStatus.CHARGING:
             charge_points.append(p)
         elif p.phase == TestStatus.DISCHARGING:
@@ -31,8 +67,15 @@ def _trapz_ah(points: List[DataPoint]) -> float:
     if len(points) < 2:
         return 0.0
 
-    timestamps = np.array([(p.timestamp - points[0].timestamp).total_seconds() for p in points], dtype=np.float64)
-    currents = np.array([abs(p.current_a) for p in points], dtype=np.float64)
+    t0 = points[0].timestamp
+    timestamps = np.array(
+        [_safe_float((p.timestamp - t0).total_seconds(), default=0.0) for p in points],
+        dtype=np.float64,
+    )
+    currents = np.array(
+        [abs(_safe_float(p.current_a, default=0.0)) for p in points],
+        dtype=np.float64,
+    )
 
     integral_s = float(np.trapz(currents, timestamps))
     return integral_s / 3600.0
@@ -42,8 +85,15 @@ def _trapz_wh(points: List[DataPoint]) -> float:
     if len(points) < 2:
         return 0.0
 
-    timestamps = np.array([(p.timestamp - points[0].timestamp).total_seconds() for p in points], dtype=np.float64)
-    powers = np.array([abs(p.current_a) * p.voltage_v for p in points], dtype=np.float64)
+    t0 = points[0].timestamp
+    timestamps = np.array(
+        [_safe_float((p.timestamp - t0).total_seconds(), default=0.0) for p in points],
+        dtype=np.float64,
+    )
+    powers = np.array(
+        [abs(_safe_float(p.current_a, default=0.0)) * _safe_float(p.voltage_v, default=0.0) for p in points],
+        dtype=np.float64,
+    )
 
     integral_ws = float(np.trapz(powers, timestamps))
     return integral_ws / 3600.0
@@ -53,8 +103,8 @@ def _phase_stats(points: List[DataPoint]) -> PhaseStats:
     if not points:
         return PhaseStats(0.0, 0.0, 0.0, 0.0, 0)
 
-    currents_abs = [abs(p.current_a) for p in points]
-    voltages = [p.voltage_v for p in points]
+    currents_abs = [abs(_safe_float(p.current_a, default=0.0)) for p in points]
+    voltages = [_safe_float(p.voltage_v, default=0.0) for p in points]
 
     total_capacity_ah = _trapz_ah(points)
     total_energy_wh = _trapz_wh(points)
@@ -63,15 +113,28 @@ def _phase_stats(points: List[DataPoint]) -> PhaseStats:
         weighted_v_sum = 0.0
         weighted_c_sum = 0.0
         for i in range(len(points)):
-            c = currents_abs[i]
-            v = voltages[i]
+            c = _safe_float(currents_abs[i], default=0.0)
+            v = _safe_float(voltages[i], default=0.0)
             weighted_v_sum += c * v
             weighted_c_sum += c
-        avg_voltage_v = weighted_v_sum / weighted_c_sum if weighted_c_sum > 0 else float(np.mean(voltages))
+        if weighted_c_sum > 1e-12:
+            avg_voltage_v = weighted_v_sum / weighted_c_sum
+        else:
+            valid_v = [v for v in voltages if not (np.isnan(v) or np.isinf(v))]
+            avg_voltage_v = float(np.mean(valid_v)) if valid_v else 0.0
     else:
-        avg_voltage_v = float(np.mean(voltages)) if voltages else 0.0
+        valid_v = [v for v in voltages if not (np.isnan(v) or np.isinf(v))]
+        avg_voltage_v = float(np.mean(valid_v)) if valid_v else 0.0
 
-    duration = (points[-1].timestamp - points[0].timestamp).total_seconds() if len(points) >= 2 else 0.0
+    duration = 0.0
+    if len(points) >= 2 and points[0].timestamp and points[-1].timestamp:
+        try:
+            duration = _safe_float(
+                (points[-1].timestamp - points[0].timestamp).total_seconds(),
+                default=0.0,
+            )
+        except Exception:
+            duration = 0.0
 
     return PhaseStats(
         total_capacity_ah=total_capacity_ah,
@@ -86,7 +149,11 @@ def calculate_efficiency(points: Sequence[DataPoint]) -> Optional[Dict]:
     if not points:
         return None
 
-    charge_points, discharge_points = _split_phases(points)
+    valid_points = _validate_and_filter(points)
+    if not valid_points:
+        return None
+
+    charge_points, discharge_points = _split_phases(valid_points)
 
     charge_stats = _phase_stats(charge_points)
     discharge_stats = _phase_stats(discharge_points)
