@@ -10,6 +10,7 @@ from app.config import settings
 def create_battery_test(db: Session, data: schemas.BatteryTestCreate) -> models.BatteryTest:
     test = models.BatteryTest(
         battery_id=data.battery_id,
+        cabinet_id=data.cabinet_id or "CAB-001",
         test_name=data.test_name,
         nominal_capacity_ah=data.nominal_capacity_ah or settings.nominal_capacity_ah,
         nominal_voltage_v=data.nominal_voltage_v or settings.nominal_voltage_v,
@@ -195,4 +196,17 @@ def get_latest_efficiency(db: Session, test_id: int) -> Optional[models.Efficien
         .filter(models.EfficiencyResult.test_id == test_id)
         .order_by(models.EfficiencyResult.calculated_at.desc())
         .first()
+    )
+
+
+def list_all_efficiency_with_tests(db: Session, skip: int = 0, limit: int = 10000):
+    from sqlalchemy.orm import joinedload
+
+    return (
+        db.query(models.EfficiencyResult)
+        .options(joinedload(models.EfficiencyResult.test))
+        .order_by(models.EfficiencyResult.calculated_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
     )

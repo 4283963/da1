@@ -1,10 +1,19 @@
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app import crud, schemas
-from app.core.efficiency import calculate_efficiency, format_efficiency_report
+from app.config import settings
+from app.core.efficiency import (
+    aggregate_cabinet_savings,
+    calculate_efficiency,
+    calculate_energy_recovery,
+    format_efficiency_report,
+    format_saving_ranking_table,
+    log_saving_ranking,
+)
 from app.database import get_db
 
 router = APIRouter(prefix="/tests/{test_id}/efficiency", tags=["效率仿真"])
@@ -14,14 +23,22 @@ def _get_all_points(db: Session, test_id: int):
     return crud.list_data_points(db, test_id, skip=0, limit=1000000)
 
 
+def _merge_recovery_into_result(efficiency_result: Dict) -> Dict:
+    recovery = calculate_energy_recovery(efficiency_result)
+    efficiency_result.update(recovery)
+    return efficiency_result
+
+
 @router.post(
     "/calculate",
     response_model=schemas.EfficiencyResultResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="计算并存储充放电效率",
+    summary="计算并存储充放电效率（含能量回收和电费节省）",
 )
 def calculate_and_store(
     test_id: int,
+    recovery_ratio: Optional[float] = Query(None, ge=0.0, le=1.0, description="能量回收比例，默认使用配置"),
+    grid_price: Optional[float] = Query(None, ge=0.0, description="电网电价 元/kWh，默认使用配置"),
     db: Session = Depends(get_db),
 ):
     test = crud.get_battery_test(db, test_id)
@@ -36,6 +53,9 @@ def calculate_and_store(
             detail="数据不足，无法计算效率（需要同时包含充电和放电阶段的数据）",
         )
 
+    recovery = calculate_energy_recovery(result, recovery_ratio=recovery_ratio, grid_price_yuan_per_kwh=grid_price)
+    result.update(recovery)
+
     stored = crud.create_efficiency_result(db, test_id, result)
     if not stored:
         raise HTTPException(status_code=500, detail="结果存储失败")
@@ -45,11 +65,13 @@ def calculate_and_store(
 @router.get(
     "/latest",
     response_model=schemas.EfficiencyResultResponse,
-    summary="获取最新效率计算结果",
+    summary="获取最新效率计算结果（含能量回收和电费节省）",
 )
 def get_latest_efficiency(
     test_id: int,
     auto_calculate: bool = Query(False, description="如无结果则自动计算"),
+    recovery_ratio: Optional[float] = Query(None, ge=0.0, le=1.0, description="自动计算时的回收比例"),
+    grid_price: Optional[float] = Query(None, ge=0.0, description="自动计算时的电价 元/kWh"),
     db: Session = Depends(get_db),
 ):
     test = crud.get_battery_test(db, test_id)
@@ -70,6 +92,8 @@ def get_latest_efficiency(
             status_code=400,
             detail="数据不足，无法计算效率",
         )
+    recovery = calculate_energy_recovery(result, recovery_ratio=recovery_ratio, grid_price_yuan_per_kwh=grid_price)
+    result.update(recovery)
     stored = crud.create_efficiency_result(db, test_id, result)
     return stored
 
@@ -127,8 +151,12 @@ def get_efficiency_report(
         "avg_charge_voltage_v": latest.avg_charge_voltage_v,
         "avg_discharge_voltage_v": latest.avg_discharge_voltage_v,
         "charge_energy_loss_wh": latest.charge_energy_loss_wh,
+        "energy_recovery_ratio": getattr(latest, "energy_recovery_ratio", 0.0),
+        "recovered_energy_wh": getattr(latest, "recovered_energy_wh", 0.0),
+        "electricity_cost_saved_yuan": getattr(latest, "electricity_cost_saved_yuan", 0.0),
+        "grid_price_yuan_per_kwh": getattr(latest, "grid_price_yuan_per_kwh", 0.0),
         "calculated_at": latest.calculated_at,
     }
-    header = f"测试ID: {test.id} | 电池: {test.battery_id} | 名称: {test.test_name}\n"
+    header = f"测试ID: {test.id} | 电池: {test.battery_id} | 化成柜: {test.cabinet_id} | 名称: {test.test_name}\n"
     report = header + format_efficiency_report(result_dict)
     return Response(content=report, media_type="text/plain; charset=utf-8")

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import models
-from app.api import data_stream, efficiency, tests
+from app.api import data_stream, efficiency, ranking, tests
 from app.config import settings
 from app.database import engine
 
@@ -43,6 +43,7 @@ api_prefix = settings.api_prefix
 app.include_router(tests.router, prefix=api_prefix)
 app.include_router(data_stream.router, prefix=api_prefix)
 app.include_router(efficiency.router, prefix=api_prefix)
+app.include_router(ranking.router, prefix=api_prefix)
 
 
 if __name__ == "__main__":

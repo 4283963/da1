@@ -21,6 +21,7 @@ class BatteryTest(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     battery_id = Column(String, index=True, nullable=False)
+    cabinet_id = Column(String, index=True, default="CAB-001", nullable=False)
     test_name = Column(String, nullable=False)
     nominal_capacity_ah = Column(Float, nullable=False)
     nominal_voltage_v = Column(Float, nullable=False)
@@ -70,5 +71,10 @@ class EfficiencyResult(Base):
     avg_charge_voltage_v = Column(Float, nullable=False)
     avg_discharge_voltage_v = Column(Float, nullable=False)
     charge_energy_loss_wh = Column(Float, default=0.0, nullable=False)
+
+    energy_recovery_ratio = Column(Float, default=0.92, nullable=False)
+    recovered_energy_wh = Column(Float, default=0.0, nullable=False)
+    electricity_cost_saved_yuan = Column(Float, default=0.0, nullable=False)
+    grid_price_yuan_per_kwh = Column(Float, default=0.85, nullable=False)
 
     test = relationship("BatteryTest", back_populates="efficiency_results")

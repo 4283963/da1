@@ -1,10 +1,15 @@
-from dataclasses import dataclass
+import logging
+import os
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from app.config import settings
 from app.models import DataPoint, TestStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -190,6 +195,131 @@ def calculate_efficiency(points: Sequence[DataPoint]) -> Optional[Dict]:
     }
 
 
+def calculate_energy_recovery(
+    efficiency_result: Dict,
+    recovery_ratio: Optional[float] = None,
+    grid_price_yuan_per_kwh: Optional[float] = None,
+) -> Dict:
+    if recovery_ratio is None:
+        recovery_ratio = settings.default_energy_recovery_ratio
+    if grid_price_yuan_per_kwh is None:
+        grid_price_yuan_per_kwh = settings.grid_electricity_price_yuan_per_kwh
+
+    recovery_ratio = max(0.0, min(1.0, _safe_float(recovery_ratio, default=0.0)))
+    grid_price = max(0.0, _safe_float(grid_price_yuan_per_kwh, default=0.0))
+
+    discharge_wh = _safe_float(efficiency_result.get("total_discharge_wh", 0.0), default=0.0)
+    recovered_wh = discharge_wh * recovery_ratio
+    recovered_kwh = recovered_wh / 1000.0
+    cost_saved = recovered_kwh * grid_price
+
+    return {
+        "energy_recovery_ratio": recovery_ratio,
+        "recovered_energy_wh": recovered_wh,
+        "electricity_cost_saved_yuan": cost_saved,
+        "grid_price_yuan_per_kwh": grid_price,
+    }
+
+
+@dataclass
+class CabinetSaving:
+    cabinet_id: str
+    total_tests: int = 0
+    total_recovered_wh: float = 0.0
+    total_saved_yuan: float = 0.0
+
+    @property
+    def total_recovered_kwh(self) -> float:
+        return self.total_recovered_wh / 1000.0
+
+
+def aggregate_cabinet_savings(efficiency_records: Sequence) -> List[CabinetSaving]:
+    cabinets: Dict[str, CabinetSaving] = {}
+    for rec in efficiency_records:
+        test = getattr(rec, "test", None)
+        if not test:
+            continue
+        cab_id = getattr(test, "cabinet_id", None)
+        if not cab_id:
+            continue
+        if cab_id not in cabinets:
+            cabinets[cab_id] = CabinetSaving(cabinet_id=cab_id)
+        cab = cabinets[cab_id]
+        cab.total_tests += 1
+        cab.total_recovered_wh += _safe_float(getattr(rec, "recovered_energy_wh", 0.0), default=0.0)
+        cab.total_saved_yuan += _safe_float(getattr(rec, "electricity_cost_saved_yuan", 0.0), default=0.0)
+
+    ranked = sorted(cabinets.values(), key=lambda x: x.total_saved_yuan, reverse=True)
+    return ranked
+
+
+def format_saving_ranking_table(
+    ranked: List[CabinetSaving],
+    top_n: Optional[int] = None,
+    generated_at: Optional[datetime] = None,
+) -> str:
+    if generated_at is None:
+        generated_at = datetime.utcnow()
+    if top_n is None:
+        top_n = settings.top_saving_rank_count
+
+    display = ranked[:top_n]
+
+    lines = []
+    lines.append("")
+    lines.append("╔══════════════════════════════════════════════════════════════════════╗")
+    lines.append("║           锂电池化成柜 放电能量回收 电费节省 TOP 排行榜              ║")
+    lines.append("╠══════════════════════════════════════════════════════════════════════╣")
+    lines.append(
+        f"║  统计时间: {generated_at.strftime('%Y-%m-%d %H:%M:%S')}                            ║"
+    )
+    lines.append("╠══════╤═══════════╤══════════╤════════════════════╤══════════════════╣")
+    lines.append("║ 排名 │  化成柜   │ 测试次数 │  回收总电量(kWh)  │  节省电费(元)   ║")
+    lines.append("╠══════╪═══════════╪══════════╪════════════════════╪══════════════════╣")
+
+    if not display:
+        lines.append("║  --  │    --     │    --    │        --        │       --       ║")
+    else:
+        for idx, cab in enumerate(display, 1):
+            rank_str = f"{idx:>4}"
+            cab_str = f"{cab.cabinet_id:<9}"
+            tests_str = f"{cab.total_tests:>6}"
+            kwh_str = f"{cab.total_recovered_kwh:>16.4f}"
+            yuan_str = f"{cab.total_saved_yuan:>14.2f}"
+            lines.append(f"║ {rank_str} │ {cab_str} │ {tests_str} │ {kwh_str} │ {yuan_str}  ║")
+
+    lines.append("╚══════╧═══════════╧══════════╧════════════════════╧══════════════════╝")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def log_saving_ranking(
+    ranked: List[CabinetSaving],
+    top_n: Optional[int] = None,
+    output_file: Optional[str] = None,
+) -> str:
+    if top_n is None:
+        top_n = settings.top_saving_rank_count
+    if output_file is None:
+        output_file = settings.saving_report_log_file
+
+    table = format_saving_ranking_table(ranked, top_n=top_n)
+
+    logger.info("\n" + table)
+    print(table, flush=True)
+
+    try:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "a", encoding="utf-8") as f:
+            f.write(table)
+            f.write("\n")
+    except Exception as e:
+        logger.warning(f"写入节省排行报告文件失败: {e}")
+
+    return table
+
+
 def format_efficiency_report(result: Dict) -> str:
     lines = [
         "===== 锂电池化成效率分析报告 =====",
@@ -212,6 +342,21 @@ def format_efficiency_report(result: Dict) -> str:
         f"库仑效率 (CE):  {result['coulombic_efficiency'] * 100:.3f} %",
         f"能量效率 (EE):  {result['energy_efficiency'] * 100:.3f} %",
         f"电压效率 (VE):  {result['voltage_efficiency'] * 100:.3f} %",
-        "==================================",
     ]
+
+    if "recovered_energy_wh" in result and result.get("recovered_energy_wh", 0) > 0:
+        ratio = result.get("energy_recovery_ratio", 0) * 100
+        kwh = result["recovered_energy_wh"] / 1000.0
+        saved = result.get("electricity_cost_saved_yuan", 0)
+        price = result.get("grid_price_yuan_per_kwh", 0)
+        lines += [
+            "",
+            "--- 电网能量回收 ---",
+            f"回收比例: {ratio:.1f} %",
+            f"回收电量: {result['recovered_energy_wh']:.4f} Wh ({kwh:.6f} kWh)",
+            f"电网电价: {price:.2f} 元/kWh",
+            f"节省电费: {saved:.4f} 元",
+        ]
+
+    lines.append("==================================")
     return "\n".join(lines)

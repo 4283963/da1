@@ -31,6 +31,7 @@ class DataPointResponse(BaseModel):
 
 class BatteryTestCreate(BaseModel):
     battery_id: str = Field(..., description="电池唯一标识")
+    cabinet_id: Optional[str] = Field(None, description="化成柜编号，如 CAB-001")
     test_name: str = Field(..., description="测试名称")
     nominal_capacity_ah: Optional[float] = Field(None, description="标称容量(Ah)")
     nominal_voltage_v: Optional[float] = Field(None, description="标称电压(V)")
@@ -39,6 +40,7 @@ class BatteryTestCreate(BaseModel):
 class BatteryTestResponse(BaseModel):
     id: int
     battery_id: str
+    cabinet_id: str
     test_name: str
     nominal_capacity_ah: float
     nominal_voltage_v: float
@@ -66,9 +68,29 @@ class EfficiencyResultResponse(BaseModel):
     avg_charge_voltage_v: float
     avg_discharge_voltage_v: float
     charge_energy_loss_wh: float
+    energy_recovery_ratio: float
+    recovered_energy_wh: float
+    electricity_cost_saved_yuan: float
+    grid_price_yuan_per_kwh: float
 
     class Config:
         from_attributes = True
+
+
+class CabinetSavingRank(BaseModel):
+    rank: int
+    cabinet_id: str
+    total_tests: int
+    total_recovered_energy_kwh: float
+    total_cost_saved_yuan: float
+
+
+class SavingRankResponse(BaseModel):
+    generated_at: datetime
+    total_cabinets: int
+    top_n: int
+    ranking: List[CabinetSavingRank]
+    report_file: Optional[str] = None
 
 
 class TestDetailResponse(BatteryTestResponse):
